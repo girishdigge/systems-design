@@ -66,7 +66,7 @@ services:
     command:
       [
         '-path=/migrations',
-        '-database=postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}?sslmode=disable',
+        '-database=postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:5432/${DB_NAME}?sslmode=disable',
         'up',
       ]
     networks:

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database-scaling-lab/internal/repository"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
@@ -24,8 +25,31 @@ type Server struct {
 }
 
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/users/", s.handleGetUser)
 	mux.HandleFunc("/events", s.handleCreateEvent)
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	defer func() {
+		httpDuration.WithLabelValues("/health", r.Method).Observe(time.Since(start).Seconds())
+	}()
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	err := s.Repo.Pool.Ping(r.Context())
+	if err != nil {
+		http.Error(w, `{"status":"unhealthy"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"healthy"}`))
 }
 
 func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +70,7 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	name, email, err := s.Repo.GetUser(r.Context(), id)
+	user, err := s.Repo.GetUser(r.Context(), id)
 	if err != nil {
 		http.Error(w, "User record lookup collision or failure", http.StatusNotFound)
 		return
@@ -54,7 +78,7 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"name":"` + name + `","email":"` + email + `"}`))
+	_ = json.NewEncoder(w).Encode(user)
 }
 
 func (s *Server) handleCreateEvent(w http.ResponseWriter, r *http.Request) {
