@@ -1,116 +1,219 @@
 # Database Scaling Laboratory (Phase 0)
 
-A high-performance backend engineering laboratory designed to test database scalability, connection pooling optimizations, indexing strategies, and load testing under high-concurrency transactional (OLTP) and analytical (OLAP) workloads.
+A high-performance backend engineering laboratory designed to evaluate database scalability, connection pooling efficiency, indexing strategies, and load-testing behavior under high-concurrency OLTP and analytical workloads.
 
 ---
 
-## 🏗️ Architecture Overview
+# 🏗️ Architecture Overview
 
-The system is designed as a modular, containerized multi-service infrastructure environment optimizing Go backend performance against a heavy PostgreSQL data layer.
+The platform is composed of isolated Docker containers communicating over an internal bridge network. The API uses PostgreSQL through `pgxpool`, while migrations and data seeding are executed as standalone containers.
 
-+-----------------------+
-| k6 Load Tester |
-| (5,300+ req/sec) |
-+-----------+-----------+
-| (HTTP via Port 8080)
-v
-+-----------------------+
-| Go REST API Container|
-| (pgxpool Connection) |
-+-----------+-----------+
-|
-+--------------------+--------------------+
-| (Internal Docker Network Routing) |
-v v
-+------------------+ +------------------+
-| postgres-primary | <------------------- | migrate/migrate |
-| (8.1M+ Rows) | (Schema Up) | (Schema Tool) |
-+------------------+ +------------------+
+```text
+                           +----------------------+
+                           |      k6 Load Test    |
+                           |   ~5,300 req/sec    |
+                           +----------+-----------+
+                                      |
+                                      | HTTP :8080
+                                      v
+                    +----------------------------------+
+                    |        Go REST API              |
+                    |      (pgxpool Connection Pool)  |
+                    +----------------+----------------+
+                                     |
+                                     |
+                     Docker Bridge Network
+                                     |
+          +--------------------------+--------------------------+
+          |                                                     |
+          v                                                     v
++----------------------+                       +----------------------+
+|  postgres-primary    | <-------------------- | migrate/migrate      |
+|                      |     Schema Updates    | Migration Container  |
+|  8.1M+ Seeded Rows   |                       +----------------------+
++----------+-----------+
+           ^
+           |
+           | Bulk Inserts (pgx.CopyFrom)
+           |
++----------------------+
+|    Seeder Runner     |
+|  Data Generation     |
++----------------------+
+```
 
-### Infrastructure Stack
+## Infrastructure Stack
 
-- **Language Runtime:** Go 1.22+ (utilizing the native high-performance `pgx/v5` driver)
-- **Database Engine:** PostgreSQL 18 (OLTP/OLAP target layer)
-- **Migration Layer:** `golang-migrate/migrate` (Docker runtime)
-- **Load Automation:** Grafana k6 (JavaScript-driven high-concurrency engine)
-- **Observability Stack:** Prometheus (Metrics Scraper) & Grafana (Performance Dashboards)
+| Component         | Technology             |
+| ----------------- | ---------------------- |
+| Language Runtime  | Go 1.22+               |
+| Database          | PostgreSQL             |
+| Driver            | pgx/v5                 |
+| Connection Pool   | pgxpool                |
+| Migrations        | golang-migrate/migrate |
+| Load Testing      | Grafana k6             |
+| Metrics           | Prometheus             |
+| Dashboards        | Grafana                |
+| Container Runtime | Docker                 |
 
 ---
 
-## 📊 Database Schema Matrix
+# 📊 Database Schema Matrix
 
-The baseline layout models a real-world SaaS infrastructure consisting of over **8.1 Million rows** partitioned conceptually into active business operations and heavy analytical event logging:
+The baseline dataset models a realistic SaaS workload consisting of approximately **8.1 million rows**.
 
-| Table Name        | Column Layout                               | Primary Key / Indexing                            | Estimated Target Volume |
-| :---------------- | :------------------------------------------ | :------------------------------------------------ | :---------------------- |
-| **`users`**       | `id`, `name`, `email`, `created_at`         | `id` (UUID B-Tree PK), `email` (UNIQUE)           | 100,000 Rows            |
-| **`products`**    | `id`, `name`, `price`                       | `id` (UUID B-Tree PK)                             | 10,000 Rows             |
-| **`orders`**      | `id`, `user_id`, `total`, `created_at`      | `id` (UUID B-Tree PK), `idx_orders_user_id`       | 1,000,000 Rows          |
-| **`order_items`** | `id`, `order_id`, `product_id`, `quantity`  | `id` (UUID B-Tree PK), `idx_order_items_order_id` | ~2,000,000 Rows         |
-| **`events`**      | `id`, `user_id`, `event_type`, `created_at` | `id` (BIGSERIAL PK), `idx_events_created_at`      | 5,000,000 Rows          |
+| Table         | Columns                                     | Primary Key / Indexes               | Target Volume |
+| ------------- | ------------------------------------------- | ----------------------------------- | ------------- |
+| `users`       | `id`, `name`, `email`, `created_at`         | UUID PK, UNIQUE(email)              | 100,000       |
+| `products`    | `id`, `name`, `price`                       | UUID PK                             | 10,000        |
+| `orders`      | `id`, `user_id`, `total`, `created_at`      | UUID PK, idx_orders_user_id         | 1,000,000     |
+| `order_items` | `id`, `order_id`, `product_id`, `quantity`  | UUID PK, idx_order_items_order_id   | 2,000,000+    |
+| `events`      | `id`, `user_id`, `event_type`, `created_at` | BIGSERIAL PK, idx_events_created_at | 5,000,000     |
 
 ---
 
-## 🛠️ Operational Guide
+# 🛠️ Operational Guide
 
-### 1. Provisioning Infrastructure
+## 1. Start Infrastructure
 
-Spin up the decoupled operational services inside the isolated virtual bridge network:
+Launch PostgreSQL, Prometheus, Grafana, and supporting services.
 
 ```bash
 docker compose up -d
 ```
 
-2. Executing Migrations
-   Apply structural database layout schemas cleanly using the internal network host mapping:
+---
 
-docker run --rm -v $(pwd)/migrations:/migrations --network host migrate/migrate \
- -path=/migrations -database "postgres://postgres:supersecretpassword@localhost:5432/scaling_lab?sslmode=disable" up
+## 2. Apply Database Migrations
 
-3. Compiling & Executing Mass Seeder
-   To bypass host-layer 127.0.0.1 network socket collisions (caused by ghost background host Postgres services), compile the seeder to target Linux and execute it safely inside the isolated Docker network:
+Execute migrations against the running PostgreSQL instance.
 
-# Compile binary target
-
-GOOS=linux GOARCH=amd64 go build -o seeder-runner cmd/seeder/main.go
-
-# Stream 8.1M+ rows via pgx.CopyFrom Bulk Insertion
-
+```bash
 docker run --rm \
- -v $(pwd)/seeder-runner:/seeder-runner \
- -v $(pwd)/.env:/.env \
- --network database-scaling-lab_lab_network \
- ubuntu:latest /seeder-runner
+  -v $(pwd)/migrations:/migrations \
+  --network host \
+  migrate/migrate \
+  -path=/migrations \
+  -database "postgres://postgres:supersecretpassword@localhost:5432/scaling_lab?sslmode=disable" \
+  up
+```
 
-4. Running the API Web Server
-   Compile and launch the Go REST API container exposed on port 8080:
+---
 
+## 3. Build and Run the Seeder
+
+Compile the seeder for Linux and execute it inside the Docker network.
+
+### Build
+
+```bash
+GOOS=linux GOARCH=amd64 go build -o seeder-runner cmd/seeder/main.go
+```
+
+### Seed Database
+
+```bash
+docker run --rm \
+  -v $(pwd)/seeder-runner:/seeder-runner \
+  -v $(pwd)/.env:/.env \
+  --network database-scaling-lab_lab_network \
+  ubuntu:latest \
+  /seeder-runner
+```
+
+The seeder streams approximately **8.1 million rows** using PostgreSQL's high-performance `pgx.CopyFrom` bulk insertion mechanism.
+
+---
+
+## 4. Build and Run the API
+
+### Build
+
+```bash
 GOOS=linux GOARCH=amd64 go build -o api-runner cmd/api/main.go
+```
 
+### Run
+
+```bash
 docker run --rm -d \
- -p 8080:8080 \
- -v $(pwd)/api-runner:/api-runner \
- -v $(pwd)/.env:/.env \
- --name scaling-api \
- --network database-scaling-lab_lab_network \
- ubuntu:latest /api-runner
+  -p 8080:8080 \
+  -v $(pwd)/api-runner:/api-runner \
+  -v $(pwd)/.env:/.env \
+  --name scaling-api \
+  --network database-scaling-lab_lab_network \
+  ubuntu:latest \
+  /api-runner
+```
 
-⚡ Benchmarking & Load Testing Metrics (Phase 0 Baseline)
-A heavy 3-minute mixed read/write scenario was simulated using k6 to establish the performance baseline of the unoptimized infrastructure.
+Verify the API:
 
-Execution Command
+```bash
+curl http://localhost:8080/health
+```
+
+---
+
+# ⚡ Benchmarking & Load Testing
+
+A mixed read/write workload was executed using Grafana k6 for three minutes to establish a baseline before introducing optimization techniques.
+
+## Run Benchmark
+
+```bash
 k6 run k6/mixed-load.js
+```
 
-Verified Baseline Performance Metrics
-scenarios: 100 max VUs looping for 3 minutes over 3 stages
+## Test Configuration
 
-checks_total.......: 900328 5383.55/s
-checks_succeeded...: 100.00% (900328 out of 900328)
+```text
+Duration: 3 minutes
+Virtual Users: 100
+Workload: Mixed Read / Write
+Target: Go REST API + PostgreSQL
+```
+
+## Baseline Results
+
+```text
+checks_total.......: 900,328 (5383.55/s)
+checks_succeeded...: 100.00%
 checks_failed......: 0.00%
 
-HTTP Metrics:
-http_req_duration: avg=2.03ms med=1.33ms p(95)=4.82ms
-http_req_failed..: 0.00%
-http_reqs........: 900328 5383.55/s
+http_req_duration:
+  avg=2.03ms
+  med=1.33ms
+  p(95)=4.82ms
 
-Engineering InsightsB-Tree Efficiency: Lookups on /users/:id executed in $O(\log N)$ via the primary key index, maintaining sub-5ms $p(95)$ latencies despite the database housing millions of rows.Buffer Cache Impact: High request volumes achieved a high cache-hit ratio due to repeated hits on the static benchmark target user UUID string, minimizing physical disk read cycles.
+http_req_failed....: 0.00%
+http_reqs..........: 900,328 (5383.55/s)
+```
+
+---
+
+# 🔍 Engineering Insights
+
+### B-Tree Index Efficiency
+
+Queries against `/users/:id` execute through the primary-key B-tree index, maintaining logarithmic lookup complexity and sub-5ms p95 latency even with millions of records.
+
+### Buffer Cache Effectiveness
+
+The benchmark repeatedly targets a fixed set of records, resulting in a high PostgreSQL buffer-cache hit ratio and minimizing physical disk I/O.
+
+### Connection Pool Performance
+
+`pgxpool` efficiently multiplexes database connections, allowing the API to sustain more than 5,000 requests per second without excessive connection creation overhead.
+
+---
+
+# 🚀 Next Phases
+
+- Read replica deployment
+- Query plan analysis (`EXPLAIN ANALYZE`)
+- Partitioning strategies
+- Materialized views
+- PgBouncer integration
+- Horizontal API scaling
+- Advanced Prometheus metrics
+- Grafana performance dashboards
